@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Tuple
+from typing import Dict, Iterable, List, Tuple, Optional
 
 
 def hamming_distance(a: int, b: int) -> int:
@@ -15,6 +16,37 @@ def hamming_distance(a: int, b: int) -> int:
         Number of differing bits.
     """
     return (a ^ b).bit_count()
+
+
+def haversine_distance(
+    lat1: float,
+    lon1: float,
+    lat2: float,
+    lon2: float,
+) -> float:
+    """Calculates distance in meters between two GPS coordinates.
+
+    Args:
+        lat1: Latitude of first point.
+        lon1: Longitude of first point.
+        lat2: Latitude of second point.
+        lon2: Longitude of second point.
+
+    Returns:
+        Distance in meters.
+    """
+    r = 6371000
+    lat1_rad = math.radians(lat1)
+    lat2_rad = math.radians(lat2)
+    delta_lat = math.radians(lat2 - lat1)
+    delta_lon = math.radians(lon2 - lon1)
+
+    a = (
+        math.sin(delta_lat / 2) ** 2
+        + math.cos(lat1_rad) * math.cos(lat2_rad) * math.sin(delta_lon / 2) ** 2
+    )
+    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+    return r * c
 
 
 @dataclass
@@ -125,6 +157,48 @@ def cluster_near_duplicates(phashes: List[int], threshold: int, total_bits: int)
                 seen_pairs.add(pair)
                 if hamming_distance(phashes[a], phashes[b]) <= threshold:
                     uf.union(a, b)
+
+    clusters_map: Dict[int, List[int]] = {}
+    for i in range(n):
+        r = uf.find(i)
+        clusters_map.setdefault(r, []).append(i)
+    return list(clusters_map.values())
+
+
+def cluster_by_gps_location(
+    coordinates: List[Tuple[Optional[float], Optional[float]]],
+    distance_threshold: float,
+) -> List[List[int]]:
+    """Clusters images by GPS location using distance threshold.
+
+    Args:
+        coordinates: List of (latitude, longitude) tuples. None values allowed.
+        distance_threshold: Maximum distance in meters to cluster.
+
+    Returns:
+        List of clusters, each containing indices.
+    """
+    n = len(coordinates)
+    if n == 0:
+        return []
+
+    uf = UnionFind.create(n)
+
+    gps_indices = [
+        i for i, (lat, lon) in enumerate(coordinates) 
+        if lat is not None and lon is not None
+    ]
+
+    for i in range(len(gps_indices)):
+        for j in range(i + 1, len(gps_indices)):
+            idx_a = gps_indices[i]
+            idx_b = gps_indices[j]
+            lat1, lon1 = coordinates[idx_a]
+            lat2, lon2 = coordinates[idx_b]
+
+            dist = haversine_distance(lat1, lon1, lat2, lon2)
+            if dist <= distance_threshold:
+                uf.union(idx_a, idx_b)
 
     clusters_map: Dict[int, List[int]] = {}
     for i in range(n):

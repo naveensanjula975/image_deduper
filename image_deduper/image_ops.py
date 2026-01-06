@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Generator, Iterable, Optional, Tuple
 
 from PIL import Image, ImageOps, UnidentifiedImageError
+from PIL.ExifTags import GPSTAGS, TAGS
 
 
 @dataclass(frozen=True)
@@ -18,6 +19,9 @@ class ImageAnalysis:
     sha256: str
     phash: int
     quality: float
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
+    capture_time: Optional[str] = None
 
 
 def iter_image_files(
@@ -120,10 +124,89 @@ def _laplacian_variance_gray(img: Image.Image) -> float:
     return var
 
 
+def _convert_gps_to_degrees(value: Tuple) -> Optional[float]:
+    """Converts GPS coordinates from EXIF format to decimal degrees.
+
+    Args:
+        value: GPS coordinate tuple from EXIF (degrees, minutes, seconds).
+
+    Returns:
+        Decimal degrees or None if conversion fails.
+    """
+    try:
+        degrees = float(value[0])
+        minutes = float(value[1])
+        seconds = float(value[2])
+        return degrees + (minutes / 60.0) + (seconds / 3600.0)
+    except (TypeError, IndexError, ValueError, ZeroDivisionError):
+        return None
+
+
+def _extract_gps_from_exif(exif_data: dict) -> Tuple[Optional[float], Optional[float]]:
+    """Extracts latitude and longitude from EXIF data.
+
+    Args:
+        exif_data: Raw EXIF data dictionary.
+
+    Returns:
+        Tuple of (latitude, longitude) or (None, None).
+    """
+    gps_info = None
+    for key, value in exif_data.items():
+        tag_name = TAGS.get(key, key)
+        if tag_name == "GPSInfo":
+            gps_info = {}
+            for gps_key, gps_value in value.items():
+                gps_tag_name = GPSTAGS.get(gps_key, gps_key)
+                gps_info[gps_tag_name] = gps_value
+            break
+
+    if not gps_info:
+        return None, None
+
+    lat = gps_info.get("GPSLatitude")
+    lat_ref = gps_info.get("GPSLatitudeRef")
+    lon = gps_info.get("GPSLongitude")
+    lon_ref = gps_info.get("GPSLongitudeRef")
+
+    if not all([lat, lat_ref, lon, lon_ref]):
+        return None, None
+
+    latitude = _convert_gps_to_degrees(lat)
+    longitude = _convert_gps_to_degrees(lon)
+
+    if latitude is None or longitude is None:
+        return None, None
+
+    if lat_ref == "S":
+        latitude = -latitude
+    if lon_ref == "W":
+        longitude = -longitude
+
+    return latitude, longitude
+
+
+def _extract_capture_time_from_exif(exif_data: dict) -> Optional[str]:
+    """Extracts capture timestamp from EXIF data.
+
+    Args:
+        exif_data: Raw EXIF data dictionary.
+
+    Returns:
+        DateTime string if found, otherwise None.
+    """
+    for key, value in exif_data.items():
+        tag_name = TAGS.get(key, key)
+        if tag_name in ("DateTimeOriginal", "DateTime", "DateTimeDigitized"):
+            return str(value)
+    return None
+
+
 def analyze_image(
     path: Path,
     phash_size: int,
     logger: logging.Logger,
+    extract_metadata: bool = True,
 ) -> Optional[ImageAnalysis]:
     """Loads and analyzes an image, returning computed features.
 
@@ -131,6 +214,7 @@ def analyze_image(
         path: Image file path.
         phash_size: Hash grid size.
         logger: Logger instance.
+        extract_metadata: Whether to extract GPS and timestamp metadata.
 
     Returns:
         ImageAnalysis if successful; otherwise None.
@@ -152,7 +236,30 @@ def analyze_image(
             sharp = _laplacian_variance_gray(thumb)
             pixels = float(width * height)
             quality = (sharp + 1.0) * (pixels ** 0.5)
-            return ImageAnalysis(width=width, height=height, sha256=sha, phash=phash, quality=quality)
+
+            latitude = None
+            longitude = None
+            capture_time = None
+
+            if extract_metadata:
+                try:
+                    exif_data = im._getexif()
+                    if exif_data:
+                        latitude, longitude = _extract_gps_from_exif(exif_data)
+                        capture_time = _extract_capture_time_from_exif(exif_data)
+                except (AttributeError, KeyError, TypeError) as e:
+                    logger.debug(f"Failed to extract metadata from {path}: {e}")
+
+            return ImageAnalysis(
+                width=width,
+                height=height,
+                sha256=sha,
+                phash=phash,
+                quality=quality,
+                latitude=latitude,
+                longitude=longitude,
+                capture_time=capture_time,
+            )
     except (UnidentifiedImageError, OSError, ValueError) as e:
         logger.warning(f"Failed to open/analyze image: {path} ({e})")
         return None

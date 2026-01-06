@@ -6,14 +6,14 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
 
 from image_deduper.config import AppSettings
-from image_deduper.dedupe import cluster_near_duplicates
+from image_deduper.dedupe import cluster_near_duplicates, cluster_by_gps_location
 from image_deduper.image_ops import analyze_image, iter_image_files
 from image_deduper.io_ops import export_selected, prepare_output_dir
 from image_deduper.models import ImageRecord
 
 
 class ImageDeduper:
-    """Deduplicates images (exact + near-duplicate) and selects a target count."""
+    """Deduplicates images (exact + near-duplicate + GPS) and selects a target count."""
 
     def __init__(self, settings: AppSettings, logger: Optional[logging.Logger] = None) -> None:
         """Initializes the deduper.
@@ -52,7 +52,16 @@ class ImageDeduper:
 
         records: List[ImageRecord] = []
         with ThreadPoolExecutor(max_workers=self.settings.workers) as ex:
-            futures = {ex.submit(analyze_image, p, self.settings.phash_size, self.logger): p for p in files}
+            futures = {
+                ex.submit(
+                    analyze_image,
+                    p,
+                    self.settings.phash_size,
+                    self.logger,
+                    self.settings.enable_metadata_extraction,
+                ): p
+                for p in files
+            }
             for fut in as_completed(futures):
                 path = futures[fut]
                 try:
@@ -73,11 +82,16 @@ class ImageDeduper:
                             sha256=analysis.sha256,
                             phash=analysis.phash,
                             quality=float(analysis.quality),
+                            latitude=analysis.latitude,
+                            longitude=analysis.longitude,
+                            capture_time=analysis.capture_time,
                         )
                     )
                 except OSError as e:
                     self.logger.warning(f"Failed to stat file: {path} ({e})")
-        self.logger.info(f"Analyzed {len(records)} images successfully")
+
+        gps_count = sum(1 for r in records if r.has_gps)
+        self.logger.info(f"Analyzed {len(records)} images successfully ({gps_count} with GPS data)")
         return records
 
     def _dedupe_exact(self, records: List[ImageRecord]) -> List[ImageRecord]:
@@ -96,7 +110,16 @@ class ImageDeduper:
         kept: List[ImageRecord] = []
         removed = 0
         for group in by_sha.values():
-            group_sorted = sorted(group, key=lambda x: (x.quality, x.pixels, -x.file_size), reverse=True)
+            group_sorted = sorted(
+                group,
+                key=lambda x: (
+                    x.has_gps if self.settings.prefer_gps_images else False,
+                    x.quality,
+                    x.pixels,
+                    -x.file_size,
+                ),
+                reverse=True,
+            )
             kept.append(group_sorted[0])
             removed += max(0, len(group_sorted) - 1)
         self.logger.info(f"Exact dedupe removed {removed} files")
@@ -124,10 +147,52 @@ class ImageDeduper:
         removed = 0
         for cluster in clusters:
             group = [records[i] for i in cluster]
-            group_sorted = sorted(group, key=lambda x: (x.quality, x.pixels, -x.file_size), reverse=True)
+            group_sorted = sorted(
+                group,
+                key=lambda x: (
+                    x.has_gps if self.settings.prefer_gps_images else False,
+                    x.quality,
+                    x.pixels,
+                    -x.file_size,
+                ),
+                reverse=True,
+            )
             selected.append(group_sorted[0])
             removed += max(0, len(group_sorted) - 1)
         self.logger.info(f"Near-duplicate clustering removed {removed} files")
+        return selected
+
+    def _dedupe_by_gps(self, records: List[ImageRecord]) -> List[ImageRecord]:
+        """Deduplicates images taken at the same GPS location.
+
+        Args:
+            records: Image records.
+
+        Returns:
+            GPS-deduplicated records.
+        """
+        if not records:
+            return []
+
+        coordinates = [(r.latitude, r.longitude) for r in records]
+        clusters = cluster_by_gps_location(
+            coordinates=coordinates,
+            distance_threshold=self.settings.gps_distance_threshold,
+        )
+
+        selected: List[ImageRecord] = []
+        removed = 0
+        for cluster in clusters:
+            group = [records[i] for i in cluster]
+            group_sorted = sorted(
+                group,
+                key=lambda x: (x.quality, x.pixels, -x.file_size),
+                reverse=True,
+            )
+            selected.append(group_sorted[0])
+            removed += max(0, len(group_sorted) - 1)
+
+        self.logger.info(f"GPS location clustering removed {removed} files")
         return selected
 
     def _select_top_n(self, records: List[ImageRecord], n: int) -> List[ImageRecord]:
@@ -142,11 +207,20 @@ class ImageDeduper:
         """
         if n <= 0:
             return []
-        records_sorted = sorted(records, key=lambda x: (x.quality, x.pixels, -x.file_size), reverse=True)
+        records_sorted = sorted(
+            records,
+            key=lambda x: (
+                x.has_gps if self.settings.prefer_gps_images else False,
+                x.quality,
+                x.pixels,
+                -x.file_size,
+            ),
+            reverse=True,
+        )
         return records_sorted[: min(n, len(records_sorted))]
 
     def run(self) -> List[Path]:
-        """Runs the pipeline: analyze -> exact dedupe -> near dedupe -> select -> export.
+        """Runs the pipeline: analyze -> exact dedupe -> near dedupe -> GPS dedupe -> select -> export.
 
         Returns:
             Paths to exported images.
@@ -157,6 +231,10 @@ class ImageDeduper:
         records = self._build_records()
         records = self._dedupe_exact(records)
         records = self._dedupe_near(records)
+
+        if self.settings.enable_gps_filter:
+            records = self._dedupe_by_gps(records)
+
         selected = self._select_top_n(records, self.settings.target_count)
 
         self.logger.info(f"Selected {len(selected)} unique images for export")

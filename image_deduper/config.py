@@ -20,6 +20,10 @@ class AppSettings(BaseSettings):
         workers: Number of worker threads for hashing and analysis.
         copy_mode: Whether to copy files; if False, hardlink when possible, else copy.
         overwrite_output: Whether to overwrite existing output directory contents.
+        enable_gps_filter: Whether to enable GPS-based location filtering.
+        gps_distance_threshold: Distance in meters to consider same location.
+        prefer_gps_images: Prefer images with GPS data when selecting best.
+        enable_metadata_extraction: Whether to extract EXIF metadata.
     """
 
     input_paths: List[Path] = Field(..., min_items=1)
@@ -37,6 +41,11 @@ class AppSettings(BaseSettings):
 
     copy_mode: bool = Field(True)
     overwrite_output: bool = Field(False)
+
+    enable_gps_filter: bool = Field(False)
+    gps_distance_threshold: float = Field(50.0, ge=0.0, le=10000.0)
+    prefer_gps_images: bool = Field(True)
+    enable_metadata_extraction: bool = Field(True)
 
     class Config:
         env_prefix = "IMG_DEDUP_"
