@@ -1,0 +1,12 @@
+# Core dependencies
+pydantic>=2.0.0,<3.0.0
+pillow>=10.0.0
+imagehash>=4.3.0
+
+# Optional: For enhanced quality detection
+# opencv-python>=4.8.0
+
+# Development dependencies
+pytest>=7.4.0
+pytest-cov>=4.1.0
+pytest-asyncio>=0.21.0
